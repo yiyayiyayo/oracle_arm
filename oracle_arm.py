@@ -1,3 +1,4 @@
+import logging
 import oci
 import re
 import time
@@ -7,6 +8,7 @@ import sys
 import requests
 import random
 import base64
+
 # tg pusher config
 USE_TG = False  # 如果启用tg推送 要设置为True
 TG_BOT_TOKEN = ''  # 通过 @BotFather 申请获得，示例：1077xxx4424:AAFjv0FcqxxxxxxgEMGfi22B4yh15R5uw
@@ -20,9 +22,9 @@ def telegram(desp):
                              '/sendMessage',
                              data=data)
     if response.status_code != 200:
-        print('Telegram Bot 推送失败')
+        logging.error(f'Telegram Bot 推送失败, {response.text}')
     else:
-        print('Telegram Bot 推送成功')
+        logger.info('Telegram Bot 推送成功')
 
 
 class OciUser:
@@ -43,7 +45,7 @@ class OciUser:
         self.parse(cfg)
 
     def parse(self, cfg) -> None:
-        print("parser cfg")
+        logger.debug("parser cfg")
         self.user = cfg['user']
         self.fingerprint = cfg["fingerprint"]
         self.key_file = cfg["key_file"]
@@ -66,16 +68,16 @@ class FileParser:
 
     def parser(self, file_path):
         # compoartment id
-        # print("开始解析参数")
+        logger.debug("开始解析参数")
 
         try:
-            print("filepath", file_path)
+            logger.debug(f"filepath {file_path}")
             f = open(file_path, "r")
             self._filebuf = f.read()
             f.close()
 
         except Exception as e:
-            print("main.tf文件打开失败,请再一次确认执行了正确操作,脚本退出", e)
+            logging.error(f"main.tf文件打开失败,请再一次确认执行了正确操作,脚本退出, {e}")
             exit(0)
 
         compoartment_pat = re.compile('compartment_id = "(.*)"')
@@ -113,13 +115,13 @@ class FileParser:
         except IndexError:
             self.boot_volume_size_in_gbs = 50.0
 
-        # print("硬盘大小", self.boot_volume_size_in_gbs)
+        logger.debug(f"硬盘大小, {self.boot_volume_size_in_gbs}GB")
         # 读取密钥
         ssh_rsa_pat = re.compile('"ssh_authorized_keys" = "(.*)"')
         try:
             self.ssh_authorized_keys = ssh_rsa_pat.findall(self._filebuf).pop()
         except Exception as e:
-            print("推荐创建堆栈的时候下载ssh key，理论上是可以不用的，但是我没写😂,麻烦重新创建吧")
+            logging.warning("推荐创建堆栈的时候下载ssh key，理论上是可以不用的，但是我没写😂,麻烦重新创建吧")
 
     @property
     def ssh_authorized_keys(self):
@@ -200,17 +202,21 @@ class InsCreate:
     try_count = 0
     desp = ""
 
-    def __init__(self, user: OciUser, filepath) -> None:
+    def __init__(self, user: OciUser, filepath, _min_gap, _max_gap) -> None:
         self._user = user
         self._client = ComputeClient(config=dict(user))
         self.tf = FileParser(filepath)
+        self._min_gap = _min_gap
+        self._max_gap = _max_gap
+        self._gap_step = (max_gap - min_gap) / 10
+        self.sleep_time = min_gap
 
     def gen_pwd(self):
         passwd = ''.join(
             random.sample(
                 'ZYXWVUTSRQPONMLKJIHGFEDCBAzyxwvutsrqponmlkjihgfedcba#@1234567890',
                 13))
-        print("创建ssh登陆密码:{}\n".format(passwd))
+        logger.info(f"创建ssh登陆密码:{passwd}\n")
         self._pwd = passwd
         sh = '#!/bin/bash \n    echo root:' + passwd + " | sudo chpasswd root\n    sudo sed -i 's/^.*PermitRootLogin.*/PermitRootLogin yes/g' /etc/ssh/sshd_config;\n    sudo sed -i 's/^.*PasswordAuthentication.*/PasswordAuthentication yes/g' /etc/ssh/sshd_config;\n    sudo reboot"
         sh64 = base64.b64encode(sh.encode('utf-8'))
@@ -218,7 +224,7 @@ class InsCreate:
         self._slcmd = sh64
 
     def create(self):
-        # print("与运行创建活动")
+        # logger.info("与运行创建活动")
         # 开启一个tg的原始推送
         text = "脚本开始启动:\n,区域:{}-实例:{},CPU:{}C-内存:{}G-硬盘:{}G的小🐔已经快马加鞭抢购了\n".format(
             self.tf.availability_domain, self.tf.display_name, self.tf.ocpus,
@@ -231,12 +237,12 @@ class InsCreate:
             except oci.exceptions.ServiceError as e:
                 if e.status == 429 and e.code == 'TooManyRequests' and e.message == 'Too many requests for the user':
                     # 被限速了，改一下时间
-                    print("请求太快了，自动调整请求时间ing")
-                    if self.sleep_time < 60:
-                        self.sleep_time += 10
+                    if self.sleep_time + self._gap_step <= self._max_gap:
+                        self.sleep_time += self._gap_step
+                    logger.info(f"请求太快了，自动调整请求时间: {self.sleep_time}秒")
                 elif not (e.status == 500 and e.code == 'InternalError'
                           and e.message == 'Out of host capacity.'):
-                    if "Service limit" in e.message and e.status==400:
+                    if "Service limit" in e.message and e.status == 400:
 
                         # 可能是别的错误，也有可能是 达到上限了，要去查看一下是否开通成功，也有可能错误了
                         self.logp("❌如果看到这条推送,说明刷到机器，但是开通失败了，请后台检查你的cpu，内存，硬盘占用情况，并释放对应的资源 返回值:{},\n 脚本停止".format(e))
@@ -245,16 +251,16 @@ class InsCreate:
                     telegram(self.desp)
                     raise e
                 else:
-                    # 没有被限速，恢复减少的时间
-                    print("目前没有请求限速,快马加刷中")
-                    if self.sleep_time > 15:
-                        self.sleep_time -= 10
-                print("本次返回信息:",e)
+                    if self.sleep_time >= self._min_gap + self._gap_step:
+                        # 没有被限速，恢复减少的时间
+                        self.sleep_time -= self._gap_step
+                        logger.info(f"目前没有请求限速,快马加刷中: {self.sleep_time}")
+                logger.info(f"本次返回信息: {e}\n")
                 time.sleep(self.sleep_time)
             else:
                 #  开通成功 ，ins 就是返回的数据
                 #  可以等一会去请求实例的ip
-                # print("开通成功之后的ins:\n\n", ins, type(ins))
+                # logger.info("开通成功之后的ins:\n\n", ins, type(ins))
                 self.logp(
                     "🎉经过 {} 尝试后\n 区域:{}实例:{}-CPU:{}C-内存:{}G🐔创建成功了🎉\n".format(
                         self.try_count + 1,
@@ -271,28 +277,27 @@ class InsCreate:
                 break
             finally:
                 self.try_count += 1
-                print("抢注中，已经经过:{}尝试".format(self.try_count))
+                logger.info(f"抢注中，已经经过:{self.try_count}尝试")
 
     def check_public_ip(self):
-
         network_client = VirtualNetworkClient(config=dict(self._user))
-        count=100
+        count = 100
         while count:
             attachments = self._client.list_vnic_attachments(
                 compartment_id=self._user.compartment_id(),
                 instance_id=self.ins_id)
             data = attachments.data
             if len(data) != 0:
-                print("开始查找vnic id ")
+                logger.info("开始查找vnic id ")
                 vnic_id = data[0].vnic_id
                 public_ip = network_client.get_vnic(vnic_id).data.public_ip
                 self.logp("公网ip为:{}\n 🐢脚本停止，感谢使用😄\n".format(public_ip))
                 self.public_ip = public_ip
-                return 
+                return
             time.sleep(5)
-            count-=1
+            count -= 1
         self.logp("开机失败，被他娘甲骨文给关掉了😠，脚本停止，请重新运行\n")
-        
+
     def lunch_instance(self):
         return self._client.launch_instance(
             oci.core.models.LaunchInstanceDetails(
@@ -315,13 +320,31 @@ class InsCreate:
             )).data
 
     def logp(self, text):
-        print(text)
+        logger.info(text)
         if USE_TG:
             self.desp += text
 
 
+def init_logger():
+    fh = logging.FileHandler("./log.txt", mode='w')
+    fh.setFormatter(logging.Formatter('%(asctime)s %(levelname)-8s %(message)s'))
+
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.INFO)
+
+    _logger = logging.getLogger("OCI")
+    _logger.setLevel(logging.DEBUG)
+    _logger.addHandler(fh)
+    _logger.addHandler(ch)
+
+    return _logger
+
+
 if __name__ == "__main__":
+    logger = init_logger()
     user = OciUser()
     path = sys.argv[1]
-    ins = InsCreate(user, path)
+    min_gap = int(sys.argv[2]) if len(sys.argv) >= 3 else 40
+    max_gap = int(sys.argv[3]) if len(sys.argv) >= 4 else 200
+    ins = InsCreate(user, path, min_gap, max_gap)
     ins.create()
