@@ -1,0 +1,13 @@
+request:
+  min_gap: 40
+  max_gap: 200
+telegram:
+  # 如果启用tg推送 要设置为true
+  enable: false
+  # 通过 @BotFather 申请获得，示例：1077xxx4424:AAFjv0FcqxxxxxxgEMGfi22B4yh15R5uw
+  bot_token: ''
+  # 用户、群组或频道 ID，示例：129xxx206
+  user_id: ''
+  # 自建 API 反代地址，供网络环境无法访问时使用，网络正常则保持默认
+  api_host: 'api.telegram.org'
+

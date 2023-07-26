@@ -8,19 +8,13 @@ import sys
 import requests
 import random
 import base64
-
-# tg pusher config
-USE_TG = False  # 如果启用tg推送 要设置为True
-TG_BOT_TOKEN = ''  # 通过 @BotFather 申请获得，示例：1077xxx4424:AAFjv0FcqxxxxxxgEMGfi22B4yh15R5uw
-TG_USER_ID = ''  # 用户、群组或频道 ID，示例：129xxx206
-TG_API_HOST = 'api.telegram.org'  # 自建 API 反代地址，供网络环境无法访问时使用，网络正常则保持默认
+import yaml
 
 
 def telegram(desp):
-    data = (('chat_id', TG_USER_ID), ('text', '🐢甲骨文ARM抢注脚本为您播报🐢 \n\n' + desp))
-    response = requests.post('https://' + TG_API_HOST + '/bot' + TG_BOT_TOKEN +
-                             '/sendMessage',
-                             data=data)
+    data = (('chat_id', config['telegram']['user_id']), ('text', '🐢甲骨文ARM抢注脚本为您播报🐢 \n\n' + desp))
+    response = requests.post('https://' + config['telegram']['api_host'] + '/bot' + config['telegram']['bot_token'] +
+                             '/sendMessage', data=data)
     if response.status_code != 200:
         logging.error(f'Telegram Bot 推送失败, {response.text}')
     else:
@@ -53,7 +47,7 @@ class OciUser:
         self.region = cfg['region']
 
     def keys(self):
-        return ("user", "fingerprint", "key_file", "tenancy", "region")
+        return "user", "fingerprint", "key_file", "tenancy", "region"
 
     def __getitem__(self, item):
         return getattr(self, item)
@@ -208,8 +202,8 @@ class InsCreate:
         self.tf = FileParser(filepath)
         self._min_gap = _min_gap
         self._max_gap = _max_gap
-        self._gap_step = (max_gap - min_gap) / 10
-        self.sleep_time = min_gap
+        self._gap_step = (_max_gap - _min_gap) / 10
+        self.sleep_time = _min_gap
 
     def gen_pwd(self):
         passwd = ''.join(
@@ -240,6 +234,8 @@ class InsCreate:
                     if self.sleep_time + self._gap_step <= self._max_gap:
                         self.sleep_time += self._gap_step
                     logger.info(f"请求太快了，自动调整请求时间: {self.sleep_time}秒")
+                elif e.status == 502 and e.code == 'InternalError' and e.message == 'Bad Gateway':
+                    logger.info(f"Bad Gateway, ignore: {e}\n")
                 elif not (e.status == 500 and e.code == 'InternalError'
                           and e.message == 'Out of host capacity.'):
                     if "Service limit" in e.message and e.status == 400:
@@ -256,6 +252,9 @@ class InsCreate:
                         self.sleep_time -= self._gap_step
                         logger.info(f"目前没有请求限速,快马加刷中: {self.sleep_time}")
                 logger.info(f"本次返回信息: {e}\n")
+                time.sleep(self.sleep_time)
+            except (oci.exceptions.RequestException, oci.exceptions.ConnectTimeout) as e:
+                logger.info(f"Exception occurred, ignore: {e}\n")
                 time.sleep(self.sleep_time)
             else:
                 #  开通成功 ，ins 就是返回的数据
@@ -321,7 +320,7 @@ class InsCreate:
 
     def logp(self, text):
         logger.info(text)
-        if USE_TG:
+        if config['telegram']['enable']:
             self.desp += text
 
 
@@ -340,11 +339,17 @@ def init_logger():
     return _logger
 
 
+def init_config():
+    with open("config.yaml", "r") as yaml_file:
+        _config = yaml.load(yaml_file, Loader=yaml.FullLoader)
+
+    return _config
+
+
 if __name__ == "__main__":
     logger = init_logger()
+    config = init_config()
     user = OciUser()
     path = sys.argv[1]
-    min_gap = int(sys.argv[2]) if len(sys.argv) >= 3 else 40
-    max_gap = int(sys.argv[3]) if len(sys.argv) >= 4 else 200
-    ins = InsCreate(user, path, min_gap, max_gap)
+    ins = InsCreate(user, path, config['request']['min_gap'], config['request']['max_gap'])
     ins.create()
